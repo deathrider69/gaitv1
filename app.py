@@ -47,7 +47,7 @@ class GaitAnalyzer:
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
-            model_complexity=2,
+            model_complexity=1,  # Reduced complexity for stability
             enable_segmentation=True,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
@@ -79,47 +79,107 @@ class GaitAnalyzer:
         silhouettes = []
         frame_count = 0
         
+        # Get video properties first
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Set consistent frame size for processing
+        target_width = 640
+        target_height = 480
+        
         # Background subtractor for silhouette extraction
         back_sub = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
         
         print(f"Extracting silhouettes for {person_name}...")
+        print(f"Original video size: {original_width}x{original_height}")
+        print(f"Processing at: {target_width}x{target_height}")
         
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Method 1: Background subtraction for silhouette
-            fg_mask = back_sub.apply(frame)
-            
-            # Clean up the mask
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
-            
-            # Method 2: Use MediaPipe for better segmentation
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.pose.process(rgb_frame)
-            
-            if results.segmentation_mask is not None:
-                # Use MediaPipe segmentation mask
-                condition = np.stack((results.segmentation_mask,) * 3, axis=-1) > 0.5
-                silhouette_mask = np.where(condition, 255, 0).astype(np.uint8)[:, :, 0]
-            else:
-                # Fallback to background subtraction
-                silhouette_mask = fg_mask
-            
-            # Resize silhouette to standard size (128x64 is common for gait analysis)
-            silhouette_resized = cv2.resize(silhouette_mask, (64, 128))
-            
-            # Save individual silhouette
-            silhouette_path = os.path.join(silhouettes_dir, f"silhouette_{frame_count:05d}.png")
-            cv2.imwrite(silhouette_path, silhouette_resized)
-            
-            silhouettes.append(silhouette_resized)
-            frame_count += 1
+        # Initialize MediaPipe with first frame to set consistent size
+        ret, first_frame = cap.read()
+        if not ret:
+            print(f"Cannot read first frame from video: {video_path}")
+            cap.release()
+            return None
         
-        cap.release()
+        # Resize first frame to target size
+        first_frame_resized = cv2.resize(first_frame, (target_width, target_height))
+        
+        # Reset video to beginning
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        # Create new MediaPipe instance for each video to avoid state issues
+        mp_pose_local = mp.solutions.pose
+        pose_local = mp_pose_local.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Resize frame to consistent size
+                frame_resized = cv2.resize(frame, (target_width, target_height))
+                
+                # Method 1: Background subtraction for silhouette
+                fg_mask = back_sub.apply(frame_resized)
+                
+                # Clean up the mask
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+                fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
+                
+                # Method 2: Use MediaPipe for better segmentation
+                try:
+                    rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                    results = pose_local.process(rgb_frame)
+                    
+                    if results.segmentation_mask is not None:
+                        # Ensure segmentation mask is the right size
+                        seg_mask = results.segmentation_mask
+                        if seg_mask.shape[:2] == (target_height, target_width):
+                            condition = seg_mask > 0.5
+                            silhouette_mask = np.where(condition, 255, 0).astype(np.uint8)
+                        else:
+                            # Resize segmentation mask if needed
+                            seg_mask_resized = cv2.resize(seg_mask, (target_width, target_height))
+                            condition = seg_mask_resized > 0.5
+                            silhouette_mask = np.where(condition, 255, 0).astype(np.uint8)
+                    else:
+                        # Fallback to background subtraction
+                        silhouette_mask = fg_mask
+                        
+                except Exception as mp_error:
+                    print(f"MediaPipe error for frame {frame_count}: {str(mp_error)}")
+                    # Fallback to background subtraction
+                    silhouette_mask = fg_mask
+                
+                # Resize silhouette to standard size (128x64 is common for gait analysis)
+                silhouette_resized = cv2.resize(silhouette_mask, (64, 128))
+                
+                # Save individual silhouette
+                silhouette_path = os.path.join(silhouettes_dir, f"silhouette_{frame_count:05d}.png")
+                cv2.imwrite(silhouette_path, silhouette_resized)
+                
+                silhouettes.append(silhouette_resized)
+                frame_count += 1
+                
+                # Progress indicator
+                if frame_count % 30 == 0:
+                    print(f"Processed {frame_count} frames for {person_name}")
+        
+        except Exception as e:
+            print(f"Error during silhouette extraction for {person_name}: {str(e)}")
+        
+        finally:
+            cap.release()
+            pose_local.close()
         
         if len(silhouettes) > 0:
             # Create Gait Energy Image (GEI)
@@ -175,72 +235,119 @@ class GaitAnalyzer:
             print(f"Cannot open video: {video_path}")
             return None
         
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Set consistent frame size
+        target_width = 640
+        target_height = 480
+        
+        print(f"Extracting skeletal features for {person_name}...")
+        print(f"Original video size: {original_width}x{original_height}")
+        print(f"Processing at: {target_width}x{target_height}")
+        
         # Store pose landmarks for each frame
         pose_sequences = []
         annotated_frames = []
         frame_count = 0
         
-        print(f"Extracting skeletal features for {person_name}...")
+        # Create new MediaPipe instance for skeletal analysis
+        mp_pose_local = mp.solutions.pose
+        pose_local = mp_pose_local.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,  # Disable segmentation for skeletal analysis
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
         
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.pose.process(rgb_frame)
-            
-            # Create annotated frame
-            annotated_frame = frame.copy()
-            
-            if results.pose_landmarks:
-                # Draw pose landmarks
-                self.mp_drawing.draw_landmarks(
-                    annotated_frame, 
-                    results.pose_landmarks, 
-                    self.mp_pose.POSE_CONNECTIONS
-                )
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
                 
-                # Extract landmark coordinates
-                landmarks = []
-                for landmark in results.pose_landmarks.landmark:
-                    landmarks.append([
-                        landmark.x,
-                        landmark.y,
-                        landmark.z,
-                        landmark.visibility
-                    ])
+                # Resize frame to consistent size
+                frame_resized = cv2.resize(frame, (target_width, target_height))
                 
-                pose_sequences.append({
-                    'frame': frame_count,
-                    'landmarks': landmarks,
-                    'timestamp': frame_count / cap.get(cv2.CAP_PROP_FPS) if cap.get(cv2.CAP_PROP_FPS) > 0 else frame_count
-                })
-            
-            annotated_frames.append(annotated_frame)
-            frame_count += 1
+                try:
+                    rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                    results = pose_local.process(rgb_frame)
+                    
+                    # Create annotated frame
+                    annotated_frame = frame_resized.copy()
+                    
+                    if results.pose_landmarks:
+                        # Draw pose landmarks
+                        mp.solutions.drawing_utils.draw_landmarks(
+                            annotated_frame, 
+                            results.pose_landmarks, 
+                            mp_pose_local.POSE_CONNECTIONS
+                        )
+                        
+                        # Extract landmark coordinates
+                        landmarks = []
+                        for landmark in results.pose_landmarks.landmark:
+                            landmarks.append([
+                                landmark.x,
+                                landmark.y,
+                                landmark.z,
+                                landmark.visibility
+                            ])
+                        
+                        pose_sequences.append({
+                            'frame': frame_count,
+                            'landmarks': landmarks,
+                            'timestamp': frame_count / fps if fps > 0 else frame_count
+                        })
+                    
+                    annotated_frames.append(annotated_frame)
+                    
+                except Exception as mp_error:
+                    print(f"MediaPipe error for skeletal frame {frame_count}: {str(mp_error)}")
+                    # Add blank frame to maintain sequence
+                    annotated_frames.append(frame_resized.copy())
+                
+                frame_count += 1
+                
+                # Progress indicator
+                if frame_count % 30 == 0:
+                    print(f"Processed {frame_count} skeletal frames for {person_name}")
         
-        cap.release()
+        except Exception as e:
+            print(f"Error during skeletal feature extraction for {person_name}: {str(e)}")
+        
+        finally:
+            cap.release()
+            pose_local.close()
         
         if len(pose_sequences) > 0:
             # Save pose data as JSON
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             pose_data_path = os.path.join(skeletal_dir, f"pose_data_{person_name}_{timestamp}.json")
             
-            with open(pose_data_path, 'w') as f:
-                json.dump(pose_sequences, f, indent=2)
+            try:
+                with open(pose_data_path, 'w') as f:
+                    json.dump(pose_sequences, f, indent=2)
+            except Exception as e:
+                print(f"Error saving pose data: {e}")
             
             # Create skeletal gait video
             skeletal_video_path = os.path.join(skeletal_dir, f"skeletal_{person_name}_{timestamp}.mp4")
-            self.create_skeletal_video(annotated_frames, skeletal_video_path, cap.get(cv2.CAP_PROP_FPS))
+            self.create_skeletal_video(annotated_frames, skeletal_video_path, fps, (target_width, target_height))
             
             # Extract specific gait features
             gait_features = self.extract_gait_parameters(pose_sequences)
             
             # Save gait features
             features_path = os.path.join(skeletal_dir, f"gait_features_{person_name}_{timestamp}.json")
-            with open(features_path, 'w') as f:
-                json.dump(gait_features, f, indent=2)
+            try:
+                with open(features_path, 'w') as f:
+                    json.dump(gait_features, f, indent=2)
+            except Exception as e:
+                print(f"Error saving gait features: {e}")
             
             print(f"Extracted skeletal features for {person_name}")
             
@@ -254,19 +361,27 @@ class GaitAnalyzer:
         
         return None
     
-    def create_skeletal_video(self, annotated_frames, output_path, fps):
+    def create_skeletal_video(self, annotated_frames, output_path, fps, frame_size):
         """Create video with skeletal annotations"""
         if len(annotated_frames) == 0:
             return
         
-        height, width = annotated_frames[0].shape[:2]
+        width, height = frame_size
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
-        for frame in annotated_frames:
-            out.write(frame)
-        
-        out.release()
+        try:
+            for frame in annotated_frames:
+                if frame is not None and frame.shape[:2] == (height, width):
+                    out.write(frame)
+                else:
+                    # Create blank frame if there's an issue
+                    blank_frame = np.zeros((height, width, 3), dtype=np.uint8)
+                    out.write(blank_frame)
+        except Exception as e:
+            print(f"Error creating skeletal video: {e}")
+        finally:
+            out.release()
     
     def extract_gait_parameters(self, pose_sequences):
         """
