@@ -1,0 +1,12 @@
+#virtual env
+venv/
+
+#video data
+output/
+uploads/
+
+#model (is autoinstalled when the model is downloaded)
+yolo11m.pt
+
+#dummy folder
+static/
