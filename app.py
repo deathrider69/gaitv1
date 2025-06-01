@@ -40,195 +40,48 @@ def convert_to_serializable(obj, depth=0):
         return f"<error: {str(e)}>"
 
 class GaitAnalyzer:
-    """Class for extracting gait features from person videos"""
-    
+    """Streamlined class for real-time gait analysis from person videos"""
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import json
+    import os
+    from datetime import datetime
     def __init__(self):
-        # Initialize MediaPipe Pose
+        # Initialize MediaPipe Pose with world landmarks enabled
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
-            model_complexity=1,  # Reduced complexity for stability
-            enable_segmentation=True,
+            model_complexity=1,  # Required for world landmarks
+            enable_segmentation=False,  # Disabled - not needed for gait analysis
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
         self.mp_drawing = mp.solutions.drawing_utils
         
-    def extract_silhouette_and_gei(self, video_path, output_dir, person_name):
+    def calculate_angle(self, a, b, c):
+        """Calculate angle between three points"""
+        ba = np.array(a) - np.array(b)
+        bc = np.array(c) - np.array(b)
+        cos_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+        return np.degrees(np.arccos(cos_angle))
+    
+    def analyze_gait(self, video_path, output_dir, person_name, display_video=False, save_annotated_video=True):
         """
-        Extract gait silhouettes and create Gait Energy Image (GEI)
+        Analyze gait patterns from person video
         
         Args:
             video_path: Path to individual person video
             output_dir: Directory to save outputs
             person_name: Name of the person for organizing outputs
+            display_video: Whether to display video during processing
+            save_annotated_video: Whether to save annotated video output
         """
-        # Create subdirectories for gait analysis
-        gait_dir = os.path.join(output_dir, "gait_analysis", person_name)
-        silhouettes_dir = os.path.join(gait_dir, "silhouettes")
-        gei_dir = os.path.join(gait_dir, "gei")
-        
-        for dir_path in [gait_dir, silhouettes_dir, gei_dir]:
-            os.makedirs(dir_path, exist_ok=True)
-        
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"Cannot open video: {video_path}")
-            return None
-        
-        silhouettes = []
-        frame_count = 0
-        
-        # Get video properties first
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Set consistent frame size for processing
-        target_width = 640
-        target_height = 480
-        
-        # Background subtractor for silhouette extraction
-        back_sub = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
-        
-        print(f"Extracting silhouettes for {person_name}...")
-        print(f"Original video size: {original_width}x{original_height}")
-        print(f"Processing at: {target_width}x{target_height}")
-        
-        # Initialize MediaPipe with first frame to set consistent size
-        ret, first_frame = cap.read()
-        if not ret:
-            print(f"Cannot read first frame from video: {video_path}")
-            cap.release()
-            return None
-        
-        # Resize first frame to target size
-        first_frame_resized = cv2.resize(first_frame, (target_width, target_height))
-        
-        # Reset video to beginning
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        
-        # Create new MediaPipe instance for each video to avoid state issues
-        mp_pose_local = mp.solutions.pose
-        pose_local = mp_pose_local.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        
-        try:
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                # Resize frame to consistent size
-                frame_resized = cv2.resize(frame, (target_width, target_height))
-                
-                # Method 1: Background subtraction for silhouette
-                fg_mask = back_sub.apply(frame_resized)
-                
-                # Clean up the mask
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-                fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
-                
-                # Method 2: Use MediaPipe for better segmentation
-                try:
-                    rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                    results = pose_local.process(rgb_frame)
-                    
-                    if results.segmentation_mask is not None:
-                        # Ensure segmentation mask is the right size
-                        seg_mask = results.segmentation_mask
-                        if seg_mask.shape[:2] == (target_height, target_width):
-                            condition = seg_mask > 0.5
-                            silhouette_mask = np.where(condition, 255, 0).astype(np.uint8)
-                        else:
-                            # Resize segmentation mask if needed
-                            seg_mask_resized = cv2.resize(seg_mask, (target_width, target_height))
-                            condition = seg_mask_resized > 0.5
-                            silhouette_mask = np.where(condition, 255, 0).astype(np.uint8)
-                    else:
-                        # Fallback to background subtraction
-                        silhouette_mask = fg_mask
-                        
-                except Exception as mp_error:
-                    print(f"MediaPipe error for frame {frame_count}: {str(mp_error)}")
-                    # Fallback to background subtraction
-                    silhouette_mask = fg_mask
-                
-                # Resize silhouette to standard size (128x64 is common for gait analysis)
-                silhouette_resized = cv2.resize(silhouette_mask, (64, 128))
-                
-                # Save individual silhouette
-                silhouette_path = os.path.join(silhouettes_dir, f"silhouette_{frame_count:05d}.png")
-                cv2.imwrite(silhouette_path, silhouette_resized)
-                
-                silhouettes.append(silhouette_resized)
-                frame_count += 1
-                
-                # Progress indicator
-                if frame_count % 30 == 0:
-                    print(f"Processed {frame_count} frames for {person_name}")
-        
-        except Exception as e:
-            print(f"Error during silhouette extraction for {person_name}: {str(e)}")
-        
-        finally:
-            cap.release()
-            pose_local.close()
-        
-        if len(silhouettes) > 0:
-            # Create Gait Energy Image (GEI)
-            gei = self.create_gei(silhouettes)
-            
-            # Save GEI
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            gei_path = os.path.join(gei_dir, f"gei_{person_name}_{timestamp}.png")
-            cv2.imwrite(gei_path, gei)
-            
-            # Create and save normalized GEI
-            gei_normalized = cv2.normalize(gei, None, 0, 255, cv2.NORM_MINMAX)
-            gei_norm_path = os.path.join(gei_dir, f"gei_normalized_{person_name}_{timestamp}.png")
-            cv2.imwrite(gei_norm_path, gei_normalized)
-            
-            print(f"Created GEI for {person_name}: {gei_path}")
-            
-            return {
-                'silhouettes_count': len(silhouettes),
-                'silhouettes_dir': silhouettes_dir,
-                'gei_path': gei_path,
-                'gei_normalized_path': gei_norm_path
-            }
-        
-        return None
-    
-    def create_gei(self, silhouettes):
-        """
-        Create Gait Energy Image from silhouettes
-        GEI is the average of all silhouettes in a gait cycle
-        """
-        if len(silhouettes) == 0:
-            return None
-        
-        # Convert to float for averaging
-        silhouettes_array = np.array(silhouettes, dtype=np.float32)
-        
-        # Calculate average (GEI)
-        gei = np.mean(silhouettes_array, axis=0)
-        
-        return gei.astype(np.uint8)
-    
-    def extract_skeletal_features(self, video_path, output_dir, person_name):
-        """
-        Extract skeletal gait features using MediaPipe Pose
-        """
-        # Create directory for skeletal features
-        skeletal_dir = os.path.join(output_dir, "gait_analysis", person_name, "skeletal")
-        os.makedirs(skeletal_dir, exist_ok=True)
+        # Create output directories
+        analysis_dir = os.path.join(output_dir, "gait_analysis", person_name)
+        os.makedirs(analysis_dir, exist_ok=True)
         
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -237,31 +90,40 @@ class GaitAnalyzer:
         
         # Get video properties
         fps = cap.get(cv2.CAP_PROP_FPS)
-        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        dt = 1.0 / fps if fps > 0 else 1.0/30.0
         
-        # Set consistent frame size
-        target_width = 640
-        target_height = 480
+        print(f"Analyzing gait for {person_name}...")
+        print(f"Video: {width}x{height} @ {fps:.1f}fps, {total_frames} frames")
         
-        print(f"Extracting skeletal features for {person_name}...")
-        print(f"Original video size: {original_width}x{original_height}")
-        print(f"Processing at: {target_width}x{target_height}")
+        # Initialize storage for gait metrics
+        gait_data = {
+            'left_knee_angles': [],
+            'right_knee_angles': [],
+            'left_hip_angles': [],
+            'right_hip_angles': [],
+            'shoulder_widths': [],
+            'torso_lengths': [],
+            'hip_widths': [],
+            'heights': [],
+            'frame_timestamps': [],
+            'center_of_mass': [],
+            'vertical_displacement': []
+        }
         
-        # Store pose landmarks for each frame
-        pose_sequences = []
-        annotated_frames = []
+        # Setup video writer for annotated output
+        annotated_video_path = None
+        out = None
+        if save_annotated_video:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            annotated_video_path = os.path.join(analysis_dir, f"annotated_{person_name}_{timestamp}.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(annotated_video_path, fourcc, fps, (width, height))
+        
         frame_count = 0
-        
-        # Create new MediaPipe instance for skeletal analysis
-        mp_pose_local = mp.solutions.pose
-        pose_local = mp_pose_local.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=False,  # Disable segmentation for skeletal analysis
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        time_elapsed = 0
         
         try:
             while cap.isOpened():
@@ -269,251 +131,371 @@ class GaitAnalyzer:
                 if not ret:
                     break
                 
-                # Resize frame to consistent size
-                frame_resized = cv2.resize(frame, (target_width, target_height))
+                # Process frame with MediaPipe
+                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.pose.process(image_rgb)
                 
-                try:
-                    rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                    results = pose_local.process(rgb_frame)
+                if not results.pose_landmarks:
+                    frame_count += 1
+                    time_elapsed += dt
+                    continue
+                
+                # Extract landmarks
+                lm = results.pose_landmarks.landmark
+                h, w, _ = frame.shape
+                
+                # Helper function for 2D coordinates
+                def xy(idx):
+                    return (int(lm[idx].x * w), int(lm[idx].y * h))
+                
+                # Key landmarks
+                L_hip = xy(23); L_knee = xy(25); L_ankle = xy(27)
+                R_hip = xy(24); R_knee = xy(26); R_ankle = xy(28)
+                L_shoulder = xy(11); R_shoulder = xy(12)
+                nose = xy(0)
+                
+                # Calculate joint angles
+                left_knee_angle = self.calculate_angle(L_hip, L_knee, L_ankle)
+                right_knee_angle = self.calculate_angle(R_hip, R_knee, R_ankle)
+                
+                # Calculate hip angles (hip-knee-ankle for thigh angle)
+                left_hip_angle = self.calculate_angle(L_shoulder, L_hip, L_knee)
+                right_hip_angle = self.calculate_angle(R_shoulder, R_hip, R_knee)
+                
+                # Calculate body measurements
+                mid_shoulder = ((L_shoulder[0] + R_shoulder[0])/2, (L_shoulder[1] + R_shoulder[1])/2)
+                mid_hip = ((L_hip[0] + R_hip[0])/2, (L_hip[1] + R_hip[1])/2)
+                
+                torso_length = np.linalg.norm(np.array(mid_shoulder) - np.array(mid_hip))
+                hip_width = np.linalg.norm(np.array(L_hip) - np.array(R_hip))
+                shoulder_width = np.linalg.norm(np.array(L_shoulder) - np.array(R_shoulder))
+                normalized_shoulder_width = shoulder_width / torso_length if torso_length > 0 else 0
+                
+                # Height estimation using world landmarks
+                total_height = 0
+                if results.pose_world_landmarks:
+                    world_lm = results.pose_world_landmarks.landmark
                     
-                    # Create annotated frame
-                    annotated_frame = frame_resized.copy()
+                    # Get key points in 3D world coordinates (meters)
+                    head = world_lm[self.mp_pose.PoseLandmark.NOSE]
+                    heel_left = world_lm[self.mp_pose.PoseLandmark.LEFT_HEEL]
+                    heel_right = world_lm[self.mp_pose.PoseLandmark.RIGHT_HEEL]
                     
-                    if results.pose_landmarks:
-                        # Draw pose landmarks
-                        mp.solutions.drawing_utils.draw_landmarks(
-                            annotated_frame, 
-                            results.pose_landmarks, 
-                            mp_pose_local.POSE_CONNECTIONS
-                        )
-                        
-                        # Extract landmark coordinates
-                        landmarks = []
-                        for landmark in results.pose_landmarks.landmark:
-                            landmarks.append([
-                                landmark.x,
-                                landmark.y,
-                                landmark.z,
-                                landmark.visibility
-                            ])
-                        
-                        pose_sequences.append({
-                            'frame': frame_count,
-                            'landmarks': landmarks,
-                            'timestamp': frame_count / fps if fps > 0 else frame_count
-                        })
-                    
-                    annotated_frames.append(annotated_frame)
-                    
-                except Exception as mp_error:
-                    print(f"MediaPipe error for skeletal frame {frame_count}: {str(mp_error)}")
-                    # Add blank frame to maintain sequence
-                    annotated_frames.append(frame_resized.copy())
+                    # Calculate height components
+                    head_height = abs(head.y)
+                    leg_length = (abs(heel_left.y) + abs(heel_right.y)) / 2
+                    total_height = head_height + leg_length
+                
+                # Store measurements
+                gait_data['left_knee_angles'].append(left_knee_angle)
+                gait_data['right_knee_angles'].append(right_knee_angle)
+                gait_data['left_hip_angles'].append(left_hip_angle)
+                gait_data['right_hip_angles'].append(right_hip_angle)
+                gait_data['shoulder_widths'].append(normalized_shoulder_width)
+                gait_data['torso_lengths'].append(torso_length)
+                gait_data['hip_widths'].append(hip_width)
+                gait_data['heights'].append(total_height)
+                gait_data['frame_timestamps'].append(time_elapsed)
+                gait_data['center_of_mass'].append([mid_hip[0]/w, mid_hip[1]/h])  # Normalized
+                gait_data['vertical_displacement'].append(nose[1]/h)  # Normalized
+                
+                # Draw pose landmarks
+                self.mp_drawing.draw_landmarks(
+                    frame, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS
+                )
+                
+                # Add text annotations
+                cv2.putText(frame, f"Norm Shoulder: {normalized_shoulder_width:.2f}",
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Left Knee: {left_knee_angle:.1f}°",
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Right Knee: {right_knee_angle:.1f}°",
+                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                #cv2.putText(frame, f"Est Height: {total_height:.2f}m",
+                #           (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Frame: {frame_count}/{total_frames}",
+                           (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                # Save annotated frame
+                if out is not None:
+                    out.write(frame)
+                
+                # Display frame if requested
+                if display_video:
+                    cv2.imshow(f'Gait Analysis - {person_name}', frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
                 
                 frame_count += 1
+                time_elapsed += dt
                 
                 # Progress indicator
                 if frame_count % 30 == 0:
-                    print(f"Processed {frame_count} skeletal frames for {person_name}")
+                    progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+                    print(f"Progress: {progress:.1f}% ({frame_count}/{total_frames})")
         
         except Exception as e:
-            print(f"Error during skeletal feature extraction for {person_name}: {str(e)}")
+            print(f"Error during gait analysis: {str(e)}")
         
         finally:
             cap.release()
-            pose_local.close()
+            if out is not None:
+                out.release()
+            if display_video:
+                cv2.destroyAllWindows()
         
-        if len(pose_sequences) > 0:
-            # Save pose data as JSON
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            pose_data_path = os.path.join(skeletal_dir, f"pose_data_{person_name}_{timestamp}.json")
-            
-            try:
-                with open(pose_data_path, 'w') as f:
-                    json.dump(pose_sequences, f, indent=2)
-            except Exception as e:
-                print(f"Error saving pose data: {e}")
-            
-            # Create skeletal gait video
-            skeletal_video_path = os.path.join(skeletal_dir, f"skeletal_{person_name}_{timestamp}.mp4")
-            self.create_skeletal_video(annotated_frames, skeletal_video_path, fps, (target_width, target_height))
-            
-            # Extract specific gait features
-            gait_features = self.extract_gait_parameters(pose_sequences)
-            
-            # Save gait features
-            features_path = os.path.join(skeletal_dir, f"gait_features_{person_name}_{timestamp}.json")
-            try:
-                with open(features_path, 'w') as f:
-                    json.dump(gait_features, f, indent=2)
-            except Exception as e:
-                print(f"Error saving gait features: {e}")
-            
-            print(f"Extracted skeletal features for {person_name}")
-            
-            return {
-                'pose_sequences_count': len(pose_sequences),
-                'pose_data_path': pose_data_path,
-                'skeletal_video_path': skeletal_video_path,
-                'gait_features_path': features_path,
-                'gait_features': gait_features
-            }
+        # Calculate derived metrics
+        analysis_results = self.calculate_gait_features(gait_data, person_name, dt)
         
-        return None
-    
-    def create_skeletal_video(self, annotated_frames, output_path, fps, frame_size):
-        """Create video with skeletal annotations"""
-        if len(annotated_frames) == 0:
-            return
+        # Save results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        width, height = frame_size
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
+        # Save raw gait data
+        data_path = os.path.join(analysis_dir, f"gait_data_{person_name}_{timestamp}.json")
         try:
-            for frame in annotated_frames:
-                if frame is not None and frame.shape[:2] == (height, width):
-                    out.write(frame)
-                else:
-                    # Create blank frame if there's an issue
-                    blank_frame = np.zeros((height, width, 3), dtype=np.uint8)
-                    out.write(blank_frame)
+            with open(data_path, 'w') as f:
+                json.dump(gait_data, f, indent=2)
         except Exception as e:
-            print(f"Error creating skeletal video: {e}")
-        finally:
-            out.release()
+            print(f"Error saving gait data: {e}")
+        
+        # Save analysis results
+        results_path = os.path.join(analysis_dir, f"gait_analysis_{person_name}_{timestamp}.json")
+        try:
+            with open(results_path, 'w') as f:
+                json.dump(analysis_results, f, indent=2)
+        except Exception as e:
+            print(f"Error saving analysis results: {e}")
+        
+        # Generate and save plots
+        plots_path = os.path.join(analysis_dir, f"gait_plots_{person_name}_{timestamp}.png")
+        self.create_gait_plots(gait_data, plots_path, person_name)
+        
+        print(f"Gait analysis complete for {person_name}")
+        print(f"Processed {frame_count} frames")
+        
+        return {
+            'person_name': person_name,
+            'frames_processed': frame_count,
+            'data_path': data_path,
+            'results_path': results_path,
+            'plots_path': plots_path,
+            'annotated_video_path': annotated_video_path,
+            'analysis_results': analysis_results
+        }
     
-    def extract_gait_parameters(self, pose_sequences):
-        """
-        Extract specific gait parameters from pose sequences
-        """
-        if len(pose_sequences) < 10:  # Need sufficient frames
-            return {}
+    def calculate_gait_features(self, gait_data, person_name, dt):
+        """Calculate advanced gait features from collected data"""
         
-        # Key landmark indices (MediaPipe Pose)
-        NOSE = 0
-        LEFT_HIP = 23
-        RIGHT_HIP = 24
-        LEFT_KNEE = 25
-        RIGHT_KNEE = 26
-        LEFT_ANKLE = 27
-        RIGHT_ANKLE = 28
-        LEFT_HEEL = 29
-        RIGHT_HEEL = 30
-        LEFT_FOOT_INDEX = 31
-        RIGHT_FOOT_INDEX = 32
+        if len(gait_data['left_knee_angles']) < 10:
+            return {'error': 'Insufficient data for analysis'}
         
-        gait_features = {
-            'stride_length': [],
-            'step_width': [],
-            'cadence': 0,
-            'swing_time': {'left': [], 'right': []},
-            'stance_time': {'left': [], 'right': []},
-            'joint_angles': {
-                'left_knee': [],
-                'right_knee': [],
-                'left_hip': [],
-                'right_hip': []
-            },
-            'center_of_mass': [],
-            'vertical_displacement': []
+        analysis_results = {
+            'person_name': person_name,
+            'summary_statistics': {},
+            'temporal_parameters': {},
+            'kinematic_parameters': {},
+            'stability_parameters': {}
         }
         
         try:
-            for seq in pose_sequences:
-                landmarks = seq['landmarks']
+            # Calculate velocities and accelerations
+            left_knee_vel = np.diff(gait_data['left_knee_angles']) / dt
+            right_knee_vel = np.diff(gait_data['right_knee_angles']) / dt
+            left_knee_acc = np.diff(left_knee_vel) / dt
+            right_knee_acc = np.diff(right_knee_vel) / dt
+            
+            # Summary statistics
+            features = {
+                'left_knee_angle': gait_data['left_knee_angles'],
+                'right_knee_angle': gait_data['right_knee_angles'],
+                'left_hip_angle': gait_data['left_hip_angles'],
+                'right_hip_angle': gait_data['right_hip_angles'],
+                'normalized_shoulder_width': gait_data['shoulder_widths'],
+                'torso_length': gait_data['torso_lengths'],
+                'hip_width': gait_data['hip_widths'],
+                'height': gait_data['heights'],
+                'left_knee_velocity': left_knee_vel.tolist(),
+                'right_knee_velocity': right_knee_vel.tolist(),
+                'left_knee_acceleration': left_knee_acc.tolist(),
+                'right_knee_acceleration': right_knee_acc.tolist()
+            }
+            
+            for feature_name, values in features.items():
+                if len(values) > 0:
+                    analysis_results['summary_statistics'][feature_name] = {
+                        'mean': float(np.mean(values)),
+                        'std': float(np.std(values)),
+                        'min': float(np.min(values)),
+                        'max': float(np.max(values)),
+                        'range': float(np.max(values) - np.min(values))
+                    }
+            
+            # Temporal parameters
+            if len(gait_data['frame_timestamps']) > 1:
+                total_time = gait_data['frame_timestamps'][-1] - gait_data['frame_timestamps'][0]
                 
-                if len(landmarks) >= 33:  # MediaPipe has 33 landmarks
-                    # Calculate center of mass (approximated by hip midpoint)
-                    left_hip = landmarks[LEFT_HIP]
-                    right_hip = landmarks[RIGHT_HIP]
-                    com_x = (left_hip[0] + right_hip[0]) / 2
-                    com_y = (left_hip[1] + right_hip[1]) / 2
-                    gait_features['center_of_mass'].append([com_x, com_y])
-                    
-                    # Vertical displacement (using nose as reference)
-                    nose_y = landmarks[NOSE][1]
-                    gait_features['vertical_displacement'].append(nose_y)
-                    
-                    # Calculate joint angles
-                    left_knee_angle = self.calculate_angle(
-                        landmarks[LEFT_HIP][:2],
-                        landmarks[LEFT_KNEE][:2],
-                        landmarks[LEFT_ANKLE][:2]
-                    )
-                    right_knee_angle = self.calculate_angle(
-                        landmarks[RIGHT_HIP][:2],
-                        landmarks[RIGHT_KNEE][:2],
-                        landmarks[RIGHT_ANKLE][:2]
-                    )
-                    
-                    gait_features['joint_angles']['left_knee'].append(left_knee_angle)
-                    gait_features['joint_angles']['right_knee'].append(right_knee_angle)
+                # Estimate gait cycles from vertical displacement
+                vertical_disp = np.array(gait_data['vertical_displacement'])
+                peaks = self.find_peaks(vertical_disp)
+                
+                if len(peaks) > 1:
+                    cycle_times = np.diff(np.array(gait_data['frame_timestamps'])[peaks])
+                    analysis_results['temporal_parameters'] = {
+                        'estimated_gait_cycles': len(peaks),
+                        'average_cycle_time': float(np.mean(cycle_times)) if len(cycle_times) > 0 else 0,
+                        'cadence_steps_per_minute': (len(peaks) * 60) / total_time if total_time > 0 else 0,
+                        'stride_frequency': len(peaks) / total_time if total_time > 0 else 0
+                    }
             
-            # Calculate summary statistics
-            if gait_features['center_of_mass']:
-                com_array = np.array(gait_features['center_of_mass'])
-                gait_features['stride_length_mean'] = np.std(com_array[:, 0]) * 2  # Approximation
-                gait_features['step_width_mean'] = np.std(com_array[:, 1]) * 2   # Approximation
+            # Kinematic parameters
+            if gait_data['heights']:
+                height_stats = analysis_results['summary_statistics'].get('height', {})
+                analysis_results['kinematic_parameters'] = {
+                    'mean_estimated_height_m': height_stats.get('mean', 0),
+                    'height_variability': height_stats.get('std', 0),
+                    'knee_angle_asymmetry': abs(
+                        analysis_results['summary_statistics']['left_knee_angle']['mean'] - 
+                        analysis_results['summary_statistics']['right_knee_angle']['mean']
+                    ),
+                    'hip_angle_asymmetry': abs(
+                        analysis_results['summary_statistics']['left_hip_angle']['mean'] - 
+                        analysis_results['summary_statistics']['right_hip_angle']['mean']
+                    ) if 'left_hip_angle' in analysis_results['summary_statistics'] else 0
+                }
             
-            if gait_features['vertical_displacement']:
-                gait_features['vertical_displacement_range'] = (
-                    np.max(gait_features['vertical_displacement']) - 
-                    np.min(gait_features['vertical_displacement'])
-                )
-            
-            # Estimate cadence (steps per minute)
-            if len(pose_sequences) > 1:
-                total_time = pose_sequences[-1]['timestamp'] - pose_sequences[0]['timestamp']
-                if total_time > 0:
-                    # Rough estimation based on vertical displacement peaks
-                    if gait_features['vertical_displacement']:
-                        peaks = self.find_gait_cycles(gait_features['vertical_displacement'])
-                        if len(peaks) > 1:
-                            gait_features['cadence'] = (len(peaks) * 60) / total_time
-            
-        except Exception as e:
-            print(f"Error extracting gait parameters: {str(e)}")
+            # Stability parameters
+            com_data = np.array(gait_data['center_of_mass'])
+            if len(com_data) > 0:
+                com_x_std = np.std(com_data[:, 0])
+                com_y_std = np.std(com_data[:, 1])
+                
+                analysis_results['stability_parameters'] = {
+                    'center_of_mass_variability_x': float(com_x_std),
+                    'center_of_mass_variability_y': float(com_y_std),
+                    'postural_stability_index': float(np.sqrt(com_x_std**2 + com_y_std**2)),
+                    'vertical_displacement_range': float(np.ptp(gait_data['vertical_displacement']))
+                }
         
-        return gait_features
+        except Exception as e:
+            analysis_results['error'] = f"Error in feature calculation: {str(e)}"
+        
+        return analysis_results
     
-    def calculate_angle(self, point1, point2, point3):
-        """Calculate angle between three points"""
-        try:
-            # Convert to numpy arrays
-            p1 = np.array(point1)
-            p2 = np.array(point2)
-            p3 = np.array(point3)
-            
-            # Calculate vectors
-            v1 = p1 - p2
-            v2 = p3 - p2
-            
-            # Calculate angle
-            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-            cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Handle numerical errors
-            angle = np.arccos(cos_angle)
-            
-            return np.degrees(angle)
-        except:
-            return 0.0
+    def find_peaks(self, data, min_distance=10):
+        """Simple peak detection"""
+        peaks = []
+        for i in range(min_distance, len(data) - min_distance):
+            if all(data[i] > data[i-j] for j in range(1, min_distance+1)) and \
+               all(data[i] > data[i+j] for j in range(1, min_distance+1)):
+                peaks.append(i)
+        return peaks
     
-    def find_gait_cycles(self, displacement_data):
-        """Find gait cycles from vertical displacement data"""
-        try:
-            # Simple peak detection
-            displacement_array = np.array(displacement_data)
+    def create_gait_plots(self, gait_data, output_path, person_name):
+        """Create comprehensive gait analysis plots"""
+        
+        plt.figure(figsize=(15, 16))
+        timestamps = gait_data['frame_timestamps']
+        
+        # Plot 1: Knee Angles
+        plt.subplot(5, 1, 1)
+        plt.plot(timestamps, gait_data['left_knee_angles'], 'b-', label='Left Knee', linewidth=2)
+        plt.plot(timestamps, gait_data['right_knee_angles'], 'r-', label='Right Knee', linewidth=2)
+        plt.title(f'Knee Angles During Gait - {person_name}', fontsize=14, fontweight='bold')
+        plt.ylabel('Angle (degrees)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 2: Hip Angles
+        plt.subplot(5, 1, 2)
+        if gait_data['left_hip_angles'] and gait_data['right_hip_angles']:
+            plt.plot(timestamps, gait_data['left_hip_angles'], 'b-', label='Left Hip', linewidth=2)
+            plt.plot(timestamps, gait_data['right_hip_angles'], 'r-', label='Right Hip', linewidth=2)
+        plt.title('Hip Angles During Gait', fontsize=12, fontweight='bold')
+        plt.ylabel('Angle (degrees)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 3: Body Measurements
+        plt.subplot(5, 1, 3)
+        plt.plot(timestamps, gait_data['shoulder_widths'], 'g-', label='Normalized Shoulder Width', linewidth=2)
+        plt.title('Normalized Shoulder Width', fontsize=12, fontweight='bold')
+        plt.ylabel('Width/Torso Ratio')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 4: Angular Velocities
+        if len(timestamps) > 1:
+            plt.subplot(5, 1, 4)
+            dt = timestamps[1] - timestamps[0] if len(timestamps) > 1 else 1
+            left_vel = np.diff(gait_data['left_knee_angles']) / dt
+            right_vel = np.diff(gait_data['right_knee_angles']) / dt
+            vel_timestamps = timestamps[:-1]
             
-            # Find local maxima (peaks)
-            peaks = []
-            for i in range(1, len(displacement_array) - 1):
-                if (displacement_array[i] > displacement_array[i-1] and 
-                    displacement_array[i] > displacement_array[i+1]):
-                    peaks.append(i)
+            plt.plot(vel_timestamps, left_vel, 'b-', label='Left Knee', linewidth=2)
+            plt.plot(vel_timestamps, right_vel, 'r-', label='Right Knee', linewidth=2)
+            plt.title('Knee Angular Velocities', fontsize=12, fontweight='bold')
+            plt.ylabel('deg/s')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+        
+        # Plot 5: Height Estimation
+        plt.subplot(5, 1, 5)
+        if gait_data['heights']:
+            plt.plot(timestamps[:len(gait_data['heights'])], gait_data['heights'], 'm-', linewidth=2)
+            plt.title('Height Estimation Over Time', fontsize=12, fontweight='bold')
+            plt.ylabel('Height (meters)')
+        plt.xlabel('Time (seconds)')
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Gait analysis plots saved to: {output_path}")
+    
+    def print_analysis_summary(self, analysis_results):
+        """Print a formatted summary of the gait analysis"""
+        
+        if 'error' in analysis_results:
+            print(f"Analysis Error: {analysis_results['error']}")
+            return
+        
+        print(f"\n{'='*50}")
+        print(f"GAIT ANALYSIS SUMMARY - {analysis_results['person_name'].upper()}")
+        print(f"{'='*50}")
+        
+        # Summary Statistics
+        if 'summary_statistics' in analysis_results:
+            print(f"\n{'='*20} FEATURE SUMMARY {'='*20}")
+            stats = analysis_results['summary_statistics']
             
-            return peaks
-        except:
-            return []
+            for feature, values in stats.items():
+                print(f"{feature:25s} mean = {values['mean']:6.2f}, std = {values['std']:6.2f}")
+        
+        # Temporal Parameters
+        if 'temporal_parameters' in analysis_results:
+            print(f"\n{'='*20} TEMPORAL PARAMETERS {'='*15}")
+            temp_params = analysis_results['temporal_parameters']
+            
+            for param, value in temp_params.items():
+                print(f"{param:30s}: {value:.2f}")
+        
+        # Kinematic Parameters
+        if 'kinematic_parameters' in analysis_results:
+            print(f"\n{'='*20} KINEMATIC PARAMETERS {'='*14}")
+            kine_params = analysis_results['kinematic_parameters']
+            
+            for param, value in kine_params.items():
+                print(f"{param:30s}: {value:.2f}")
+        
+        # Stability Parameters
+        if 'stability_parameters' in analysis_results:
+            print(f"\n{'='*20} STABILITY PARAMETERS {'='*15}")
+            stab_params = analysis_results['stability_parameters']
+            
+            for param, value in stab_params.items():
+                print(f"{param:30s}: {value:.4f}")
+        
+        print(f"\n{'='*50}")
 
 class PersonTracker:
     def __init__(self, model_name="yolo11m.pt"):
@@ -717,17 +699,17 @@ class PersonTracker:
             
             try:
                 # Extract silhouettes and GEI
-                silhouette_results = self.gait_analyzer.extract_silhouette_and_gei(
-                    video_path, output_base_dir, person_name
-                )
+                #silhouette_results = self.gait_analyzer.extract_silhouette_and_gei(
+                #    video_path, output_base_dir, person_name
+                #)
                 
                 # Extract skeletal features
-                skeletal_results = self.gait_analyzer.extract_skeletal_features(
+                skeletal_results = self.gait_analyzer.analyze_gait(
                     video_path, output_base_dir, person_name
                 )
                 
                 gait_results[person_name] = {
-                    'silhouette_analysis': silhouette_results,
+                    #'silhouette_analysis': silhouette_results,
                     'skeletal_analysis': skeletal_results
                 }
                 
@@ -1001,9 +983,7 @@ LABEL_HTML = '''
         <h1>Label Detected People</h1>
         
         <div class="instruction">
-            <strong>Instructions:</strong> Please provide names for the detected people below. 
-            Enter a unique name for each person (e.g., "John", "Person_A", etc.). 
-            You can leave some fields empty if you don't want to analyze those people.
+            <strong>Instructions:</strong> Enter names for the below detected people. 
         </div>
         
         <div id="peopleSection">
@@ -1071,7 +1051,7 @@ LABEL_HTML = '''
                     <img src="/sample_frame/${person.id}" alt="Person ${person.id}" class="person-image">
                     <h4>Person ${person.id}</h4>
                     <input type="text" class="person-input" id="label_${person.id}" 
-                           placeholder="Enter name (e.g., John, Person_A)" maxlength="50">
+                           placeholder="Enter name" maxlength="50">
                 `;
                 grid.appendChild(card);
             });
