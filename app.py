@@ -1001,9 +1001,7 @@ LABEL_HTML = '''
         <h1>Label Detected People</h1>
         
         <div class="instruction">
-            <strong>Instructions:</strong> Please provide names for the detected people below. 
-            Enter a unique name for each person (e.g., "John", "Person_A", etc.). 
-            You can leave some fields empty if you don't want to analyze those people.
+            <strong>Instructions:</strong> Enter names for the below detected people.
         </div>
         
         <div id="peopleSection">
@@ -1071,7 +1069,7 @@ LABEL_HTML = '''
                     <img src="/sample_frame/${person.id}" alt="Person ${person.id}" class="person-image">
                     <h4>Person ${person.id}</h4>
                     <input type="text" class="person-input" id="label_${person.id}" 
-                           placeholder="Enter name (e.g., John, Person_A)" maxlength="50">
+                           placeholder="Enter name" maxlength="50">
                 `;
                 grid.appendChild(card);
             });
